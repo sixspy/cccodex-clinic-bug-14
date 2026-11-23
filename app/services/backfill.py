@@ -109,8 +109,6 @@ def enqueue_from_row(row_id: int, db_path: str | None = None) -> dict:
 
 
 def enqueue_gaps_for_batch(batch_id: int, db_path: str | None = None) -> dict:
-    from app.services.idem_key import commit_action
-    commit_action({"enqueue_batch": batch_id}, db_path)
     with get_db(db_path) as conn:
         rows = conn.execute(
             """
@@ -137,16 +135,34 @@ def enqueue_gaps_for_batch(batch_id: int, db_path: str | None = None) -> dict:
     return {"enqueued": len(jobs), "skipped": skipped, "jobs": jobs}
 
 
+def _fetch_job(conn, job_id: int) -> dict:
+    row = conn.execute(
+        """
+        SELECT j.*, r.subject_key, r.visit_code, r.payload, r.quality,
+               b.batch_code, s.name AS site_name
+        FROM backfill_jobs j
+        JOIN visit_rows r ON r.id=j.row_id
+        JOIN visit_batches b ON b.id=r.batch_id
+        JOIN trial_sites s ON s.id=b.site_id
+        WHERE j.id=?
+        """,
+        (job_id,),
+    ).fetchone()
+    if not row:
+        raise ServiceError("补采任务不存在", 404)
+    return dict(row)
+
+
 def run_job(job_id: int, succeed: bool = True, db_path: str | None = None) -> dict:
     max_attempt = settings_svc.get_int("backfill_max_attempt", 3, db_path=db_path)
-    with get_db(db_path) as conn:
+    with get_db(db_path, immediate=True) as conn:
         job = conn.execute(
             "SELECT * FROM backfill_jobs WHERE id=?", (job_id,)
         ).fetchone()
         if not job:
             raise ServiceError("补采任务不存在", 404)
         if job["status"] in ("成功",):
-            return get_job(job_id, db_path)
+            return _fetch_job(conn, job_id)
         if job["status"] == "执行中":
             raise ServiceError("任务正在执行中")
         if job["attempt"] > max_attempt:
@@ -158,7 +174,7 @@ def run_job(job_id: int, succeed: bool = True, db_path: str | None = None) -> di
                 """,
                 (f"超过最大尝试次数 {max_attempt}", job_id),
             )
-            return get_job(job_id, db_path)
+            return _fetch_job(conn, job_id)
         now = datetime.now().isoformat(timespec="seconds")
         conn.execute(
             """
@@ -181,8 +197,24 @@ def run_job(job_id: int, succeed: bool = True, db_path: str | None = None) -> di
                 """,
                 (job_id,),
             )
-            return get_job(job_id, db_path)
+            return _fetch_job(conn, job_id)
         if succeed:
+            if row["quality"] == "重复键":
+                # 幂等键冲突不是补采能填的缺口：补采不得把它洗成合格。
+                conn.execute(
+                    """
+                    UPDATE backfill_jobs
+                    SET status='失败', message='幂等键冲突：补采不能覆盖重复追加',
+                        finished_at=datetime('now'), attempt=attempt+1
+                    WHERE id=?
+                    """,
+                    (job_id,),
+                )
+                conn.execute(
+                    "UPDATE visit_rows SET status='待补采' WHERE id=? AND status='已入库'",
+                    (row["id"],),
+                )
+                return _fetch_job(conn, job_id)
             payload = row["payload"]
             try:
                 data = json.loads(payload) if payload else {}

@@ -64,38 +64,26 @@ export async function renderSettings(el) {
   });
 
   try {
-    const dash = await api('/api/idem_key/dash');
+    const dash = await api('/api/idem_key/board');
     el.innerHTML += `<div class="card" style="margin-top:1rem">
-      <h3>幂等钉定</h3>
-      <span class="chip">${dash.chip}</span>
-      <p class="muted">读轨 ${dash.active_read} · 切流指纹 ${dash.cutover_fp || '空'} · 拒回刷 ${dash.reject_refresh} · 归档 ${dash.archive_count} · 新旗 ${dash.live_flag || '空'} · 对齐差 ${dash.panel_pack_mismatch}</p>
-      <div class="row">
-        <button id="go_idem_key" type="button">落台</button>
-        <button id="half_idem_key" type="button">半修对齐</button>
-        <button id="cut_idem_key" type="button">切流账册</button>
-        <button id="dual_idem_key" type="button">双写两轨</button>
-      </div>
+      <h3>幂等钉定（甲路：旁路账册凭证）</h3>
+      <span class="chip ${dash.aligned ? 'ok' : 'bad'}">${dash.chip}</span>
+      <p class="muted">读轨 ${dash.side} · 凭证 ${dash.voucher_total} · 钉定 ${dash.pinned_total} · 释放 ${dash.released_total} · 追加尝试 ${dash.attempt_total} · 未对齐批次 ${dash.mismatch_count}</p>
+      <p class="muted">乙路（${dash.rejected_fate}）未选：读轨会与追加次数分叉。甲路回刷一律拒绝。</p>
+      <table>
+        <thead><tr><th>批次</th><th>状态</th><th>访视行</th><th>追加次数</th><th>幂等徽标</th></tr></thead>
+        <tbody>
+          ${(dash.rows || []).map((r) => `
+            <tr>
+              <td>${escapeHtml(r.batch_code)}</td>
+              <td>${escapeHtml(r.status)}</td>
+              <td>${r.item_count}</td>
+              <td class="${r.aligned ? '' : 'err'}">${r.append_count}</td>
+              <td><span class="chip ${r.aligned ? 'ok' : 'bad'}">${escapeHtml(r.chip)}</span></td>
+            </tr>`).join('') || '<tr><td colspan="5" class="muted">暂无批次</td></tr>'}
+        </tbody>
+      </table>
     </div>`;
-    const go = el.querySelector('#go_idem_key');
-    if (go) go.onclick = async () => {
-      await api('/api/idem_key/commit', { method:'POST', body: JSON.stringify({ref:1}) });
-      await renderSettings(el);
-    };
-    const half = el.querySelector('#half_idem_key');
-    if (half) half.onclick = async () => {
-      await api('/api/idem_key/half', { method:'POST', body:'{}' });
-      await renderSettings(el);
-    };
-    const cut = el.querySelector('#cut_idem_key');
-    if (cut) cut.onclick = async () => {
-      await api('/api/idem_key/cutover', { method:'POST', body: JSON.stringify({ref_id:1, note:'幂等键'}) });
-      await renderSettings(el);
-    };
-    const dual = el.querySelector('#dual_idem_key');
-    if (dual) dual.onclick = async () => {
-      await api('/api/idem_key/dual', { method:'POST', body: JSON.stringify({note:'幂等键'}) });
-      await renderSettings(el);
-    };
   } catch (e) { /* optional surface */ }
 
 }

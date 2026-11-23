@@ -16,8 +16,6 @@ from app.services import qc as qc_svc
 from app.services import reconcile as reconcile_svc
 from app.services import settings as settings_svc
 from app.services import idem_key as idem_key_svc
-from app.services import idem_key_cutover as idem_key_cutover_svc
-from app.services import idem_key_dualwrite as idem_key_dual_svc
 from app.services import sites as sites_svc
 from app.services import visits as visits_svc
 from app.services.errors import ServiceError
@@ -447,45 +445,39 @@ class Api:
     @_wrap
     def idem_key_dash(self):
         _require()
-        return _json(idem_key_cutover_svc.board())
+        return _json(idem_key_svc.dashboard())
 
     @cherrypy.expose
     @_wrap
-    def idem_key_commit(self):
+    def idem_key_board(self):
         _require()
-        body = _read_json()
-        return _json(idem_key_svc.commit_action(body))
+        return _json(idem_key_svc.board())
 
     @cherrypy.expose
     @_wrap
-    def idem_key_half(self):
+    def idem_key_batch(self):
         _require()
-        return _json(idem_key_svc.reconcile_display())
+        q = _query()
+        return _json(idem_key_svc.batch_status(int(q.get("batch_id") or 0)))
 
     @cherrypy.expose
     @_wrap
-    def idem_key_snap(self):
+    def idem_key_attempts(self):
         _require()
-        return _json(idem_key_svc.snapshot())
+        q = _query()
+        return _json({"items": idem_key_svc.list_attempts(limit=int(q.get("limit") or 200))})
 
     @cherrypy.expose
     @_wrap
-    def idem_key_cutover(self):
+    def idem_key_refresh(self):
         _require()
         body = _read_json()
         return _json(
-            idem_key_cutover_svc.append_cutover(
-                int(body.get("ref_id") or 0),
-                str(body.get("note") or "幂等钉定"),
+            idem_key_svc.request_refresh(
+                int(body.get("batch_id") or 0),
+                str(body.get("note") or ""),
             )
         )
-
-    @cherrypy.expose
-    @_wrap
-    def idem_key_dual(self):
-        _require()
-        body = _read_json()
-        return _json(idem_key_dual_svc.apply_dualwrite(str(body.get("note") or "幂等钉定")))
 
     @cherrypy.expose
     @_wrap
@@ -572,19 +564,15 @@ class ApiMount:
 
         if path == "/idem_key" or path.startswith("/idem_key/"):
             parts = path.strip("/").split("/")
-            action = parts[1] if len(parts) > 1 else "dash"
-            if action in ("dash", ""):
-                return api.idem_key_dash()
-            if action == "commit":
-                return api.idem_key_commit()
-            if action == "half":
-                return api.idem_key_half()
-            if action == "snap":
-                return api.idem_key_snap()
-            if action == "cutover":
-                return api.idem_key_cutover()
-            if action == "dual":
-                return api.idem_key_dual()
+            action = parts[1] if len(parts) > 1 else "board"
+            if action in ("dash", "board", ""):
+                return api.idem_key_board()
+            if action == "batch":
+                return api.idem_key_batch()
+            if action == "attempts":
+                return api.idem_key_attempts()
+            if action == "refresh":
+                return api.idem_key_refresh()
             return _json({"error": "未知幂等钉定路由"}, 404)
 
         return _json({"error": f"未知接口 {path}"}, 404)

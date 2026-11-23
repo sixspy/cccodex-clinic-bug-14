@@ -110,9 +110,8 @@ def _field_hints(quality: str, payload: str, required: list[str]) -> list[tuple[
 
 
 def scan_batch(batch_id: int, db_path: str | None = None) -> dict:
-    from app.services.idem_key import paint_ok, commit_action
-    paint_ok(db_path)
-    commit_action({"scan_batch": batch_id}, db_path)
+    # 质控扫描只产出发现，绝不涂抹幂等徽标：读轨对不齐时徽标必须保持“重复追加”。
+    from app.services.idem_key import batch_status
     created = []
     with get_db(db_path) as conn:
         batch = conn.execute(
@@ -182,6 +181,7 @@ def scan_batch(batch_id: int, db_path: str | None = None) -> dict:
         "created": len(created),
         "findings": created,
         "open_total": len(list_findings(db_path=db_path, status="开放")),
+        "idem": batch_status(batch_id, db_path=db_path),
     }
 
 

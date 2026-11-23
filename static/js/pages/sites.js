@@ -11,7 +11,7 @@ export async function renderSites(el) {
 
   el.innerHTML = `
     <div class="card">
-      <h2><span class="chip" data-thick="idem_key">幂等已亮</span> 试验中心目录</h2>
+      <h2>试验中心目录</h2>
       <p class="muted">登记临床试验中心、启停状态与访视抓取配额。停用前须先结束采集中批次。</p>
       <div class="grid">
         <div class="stat"><div class="n">${counts.total || 0}</div><div class="l">中心总数</div></div>

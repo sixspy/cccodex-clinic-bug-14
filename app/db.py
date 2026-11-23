@@ -107,6 +107,36 @@ CREATE TABLE IF NOT EXISTS meta (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL
 );
+
+-- 幂等键甲路：旁路账册凭证。每次被接受的可重复追加写一张凭证，
+-- 读轨只认这张账册，不再读旧追加次数。
+CREATE TABLE IF NOT EXISTS idem_append_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id INTEGER NOT NULL REFERENCES visit_batches(id),
+  row_id INTEGER NOT NULL REFERENCES visit_rows(id),
+  site_id INTEGER NOT NULL REFERENCES trial_sites(id),
+  subject_key TEXT NOT NULL,
+  visit_code TEXT NOT NULL,
+  charge_id TEXT NOT NULL UNIQUE,
+  side TEXT NOT NULL DEFAULT 'bypass_ledger',
+  state TEXT NOT NULL DEFAULT 'pinned'
+    CHECK (state IN ('pinned', 'released', 'conflict')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_idem_pinned
+  ON idem_append_keys(site_id, subject_key, visit_code)
+  WHERE state='pinned';
+
+CREATE TABLE IF NOT EXISTS idem_append_attempts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  batch_id INTEGER NOT NULL,
+  subject_key TEXT NOT NULL DEFAULT '',
+  visit_code TEXT NOT NULL DEFAULT '',
+  outcome TEXT NOT NULL,
+  reason TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
 """
 
 
@@ -121,12 +151,16 @@ def ensure_db() -> Path:
 
 
 @contextmanager
-def get_db(db_path: str | Path | None = None):
+def get_db(db_path: str | Path | None = None, immediate: bool = False):
     path = Path(db_path) if db_path else Config.DATABASE_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(path)
+    conn = sqlite3.connect(path, timeout=30.0)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
+    if immediate:
+        # 先拿写锁再读，避免"读到无冲突、写入时撞锁"的两侧仓管双成功。
+        conn.execute("BEGIN IMMEDIATE")
     try:
         yield conn
         conn.commit()

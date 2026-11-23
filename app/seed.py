@@ -221,8 +221,9 @@ def seed_if_needed(db_path: str | None = None) -> None:
             """
         )
         try:
-            from app.services.idem_key import seed_skew
-            seed_skew(db_path)
+            from app.services.idem_key import seed_vouchers
+
+            seed_vouchers(db_path, conn=conn)
         except Exception:
             pass
         _meta_set(conn, "seeded", "1")

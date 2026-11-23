@@ -1,11 +1,13 @@
 import { api, chip, escapeHtml } from '../api.js';
 
 export async function renderVisits(el) {
-  const [batches, sites, protocols] = await Promise.all([
+  const [batches, sites, protocols, ledger] = await Promise.all([
     api('/api/batches'),
     api('/api/sites'),
     api('/api/protocols?status=' + encodeURIComponent('生效')),
+    api('/api/idem_key/board'),
   ]);
+  const board = ledger || {};
   const siteOpts = (sites.items || [])
     .filter((s) => s.status !== '停用')
     .map((s) => `<option value="${s.id}">${escapeHtml(s.site_code + ' · ' + s.name)}</option>`)
@@ -16,8 +18,12 @@ export async function renderVisits(el) {
 
   el.innerHTML = `
     <div class="card">
-      <h2><span class="chip" data-thick="idem_key">幂等已亮</span> 访视清单抓取批次</h2>
+      <h2>访视清单抓取批次</h2>
       <p class="muted">按试验中心开批次，模拟抓取访视行，合格行可入库，缺口行进入质控与补采。</p>
+      <div class="row">
+        <span class="chip ${board.aligned ? 'ok' : 'bad'}" data-idem-board-chip>${escapeHtml(board.chip || '幂等已亮')}</span>
+        <span class="muted">幂等账册 ${board.side || 'bypass_ledger'} · 凭证 ${board.voucher_total || 0} · 钉定 ${board.pinned_total || 0} · 释放 ${board.released_total || 0} · 未对齐批次 ${board.mismatch_count || 0}</span>
+      </div>
       <div class="row">
         <select id="siteId">${siteOpts}</select>
         <select id="protocolId"><option value="">默认生效方案</option>${protoOpts}</select>
@@ -39,7 +45,7 @@ export async function renderVisits(el) {
         <thead>
           <tr>
             <th>批次编码</th><th>中心</th><th>方案</th><th>状态</th>
-            <th>行数</th><th>缺口</th><th>备注</th><th>操作</th>
+            <th>行数</th><th>缺口</th><th>幂等徽标</th><th>追加次数</th><th>备注</th><th>操作</th>
           </tr>
         </thead>
         <tbody id="batchBody">
@@ -53,6 +59,9 @@ export async function renderVisits(el) {
     </div>`;
 
   function batchRow(b) {
+    const aligned = b.idem_aligned !== false;
+    const chipHtml = `<span class="chip ${aligned ? 'ok' : 'bad'}">${escapeHtml(b.idem_chip || (aligned ? '幂等已亮' : '重复追加'))}</span>`;
+    const countHtml = `<span${aligned ? '' : ' class="err" title="账册凭证数与访视行数对不上，已挡重复追加"'}>${b.append_count ?? 0} / ${b.item_count ?? 0}</span>`;
     return `
       <tr>
         <td>${escapeHtml(b.batch_code)}</td>
@@ -61,11 +70,13 @@ export async function renderVisits(el) {
         <td>${chip(b.status)}</td>
         <td>${b.item_count}</td>
         <td>${b.gap_count}</td>
+        <td>${chipHtml}</td>
+        <td>${countHtml}</td>
         <td class="muted">${escapeHtml(b.note || '')}</td>
         <td class="row">
-          <button data-view="${b.id}" class="ghost">查看</button>
-          <button data-crawl="${b.id}">模拟抓取</button>
-          <button data-ingest="${b.id}">合格入库</button>
+          <button data-view="${b.id}">查看</button>
+          <button data-crawl="${b.id}" class="ghost" ${aligned ? '' : 'disabled'}>模拟抓取</button>
+          <button data-ingest="${b.id}" class="ghost">合格入库</button>
           <button data-complete="${b.id}" class="warn">标已收齐</button>
           <button data-close="${b.id}" class="danger">关闭</button>
         </td>
@@ -73,7 +84,15 @@ export async function renderVisits(el) {
   }
 
   const detail = el.querySelector('#batchDetail');
-  const showErr = (msg) => { detail.innerHTML = `<p class="err">${escapeHtml(msg)}</p>`; };
+  // 非破坏式提示：只替换上一条 flash，不整块重绘详情，避免把刚发生的拒绝原因冲掉。
+  const flash = (msg, isErr) => {
+    detail.querySelectorAll('.flash').forEach((n) => n.remove());
+    detail.insertAdjacentHTML(
+      'afterbegin',
+      `<p class="${isErr ? 'err' : 'muted'} flash">${escapeHtml(msg)}</p>`,
+    );
+  };
+  const showErr = (msg) => flash(msg, true);
 
   async function loadDetail(id) {
     const b = await api(`/api/batches/${id}`);
@@ -82,10 +101,14 @@ export async function renderVisits(el) {
       <div class="row">
         <strong>${escapeHtml(b.batch_code)}</strong>
         ${chip(b.status)}
+        <span class="chip ${b.idem_aligned ? 'ok' : 'bad'}">${escapeHtml(b.idem_chip || '幂等已亮')}</span>
         <span class="muted">${escapeHtml(b.site_name)} · 方案 ${escapeHtml(b.protocol_title || '-')}</span>
       </div>
+      ${b.idem_aligned ? '' : `<p class="err">幂等徽标与追加次数对不上（账册 ${b.append_count} / 访视行 ${b.item_count}），已挡重复追加。可提交回刷申请，甲路账册会拒绝并留痕。</p>
+      <div class="row"><button id="requestRefresh" class="warn">申请回刷账册</button></div>`}
       <div class="grid">
         <div class="stat"><div class="n">${b.item_count}</div><div class="l">访视行</div></div>
+        <div class="stat"><div class="n">${b.append_count ?? 0}</div><div class="l">追加次数（账册凭证）</div></div>
         <div class="stat"><div class="n">${b.gap_count}</div><div class="l">缺口行</div></div>
         <div class="stat"><div class="n">${qs['合格'] || 0}</div><div class="l">合格</div></div>
         <div class="stat"><div class="n">${(qs['缺字段'] || 0) + (qs['编码空'] || 0) + (qs['重复键'] || 0)}</div><div class="l">异常质量</div></div>
@@ -140,17 +163,29 @@ export async function renderVisits(el) {
         await softReload();
       } catch (e) { showErr(e.message); }
     };
+    const refreshBtn = detail.querySelector('#requestRefresh');
+    if (refreshBtn) refreshBtn.onclick = async () => {
+      try {
+        const r = await api('/api/idem_key/refresh', {
+          method: 'POST',
+          body: JSON.stringify({ batch_id: id, note: '页面申请回刷账册' }),
+        });
+        await loadDetail(id);
+        showErr(`${r.message}（已拒绝，凭证仍为 ${r.append_count}）`);
+      } catch (e) { showErr(e.message); }
+    };
     detail.querySelector('#runQc').onclick = async () => {
       try {
         const r = await api(`/api/batches/${id}/qc`, { method: 'POST', body: '{}' });
-        detail.insertAdjacentHTML('afterbegin', `<p class="muted">质控新建发现 ${r.created} 条</p>`);
         await loadDetail(id);
+        flash(`质控新建发现 ${r.created} 条`, false);
       } catch (e) { showErr(e.message); }
     };
     detail.querySelector('#enqueueGaps').onclick = async () => {
       try {
         const r = await api(`/api/batches/${id}/backfill`, { method: 'POST', body: '{}' });
-        detail.insertAdjacentHTML('afterbegin', `<p class="muted">已排队 ${r.enqueued}，跳过 ${r.skipped}</p>`);
+        await loadDetail(id);
+        flash(`已排队 ${r.enqueued}，跳过 ${r.skipped}`, false);
       } catch (e) { showErr(e.message); }
     };
     detail.querySelectorAll('[data-enqueue-row]').forEach((btn) => {

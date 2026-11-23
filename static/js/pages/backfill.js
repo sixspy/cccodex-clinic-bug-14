@@ -9,7 +9,7 @@ export async function renderBackfill(el) {
 
   el.innerHTML = `
     <div class="card">
-      <h2><span class="chip" data-thick="idem_key">幂等已亮</span> 缺口补采队列</h2>
+      <h2>缺口补采队列</h2>
       <p class="muted">对待补采/缺口访视行排队补采；执行成功会把载荷补齐、质量改合格并关闭关联质控发现。</p>
       <div class="grid">
         <div class="stat"><div class="n">${summary['排队'] || 0}</div><div class="l">排队</div></div>

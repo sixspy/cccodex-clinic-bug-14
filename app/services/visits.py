@@ -6,6 +6,7 @@ from datetime import datetime
 
 from app.db import get_db
 from app.services import audit as audit_svc
+from app.services import idem_key as idem_key_svc
 from app.services import protocols as protocols_svc
 from app.services.errors import ServiceError
 
@@ -51,7 +52,10 @@ def list_batches(
         rows = conn.execute(
             f"""
             SELECT b.*, s.name AS site_name, s.site_code,
-                   p.protocol_code, p.version AS protocol_version
+                   p.protocol_code, p.version AS protocol_version,
+                   (SELECT COUNT(*) FROM visit_rows r WHERE r.batch_id=b.id) AS row_count,
+                   (SELECT COUNT(*) FROM idem_append_keys k
+                    WHERE k.batch_id=b.id) AS append_count
             FROM visit_batches b
             JOIN trial_sites s ON s.id=b.site_id
             LEFT JOIN protocols p ON p.id=b.protocol_id
@@ -60,7 +64,16 @@ def list_batches(
             """,
             params,
         ).fetchall()
-        return [dict(r) for r in rows]
+        items = []
+        for r in rows:
+            d = dict(r)
+            d["item_count"] = d["row_count"]
+            aligned = d["item_count"] == d["append_count"]
+            d["idem_aligned"] = aligned
+            d["idem_chip"] = idem_key_svc.OK if aligned else idem_key_svc.BAD
+            d["idem_blocked"] = not aligned
+            items.append(d)
+        return items
 
 
 def get_batch(batch_id: int, db_path: str | None = None) -> dict:
@@ -97,6 +110,16 @@ def get_batch(batch_id: int, db_path: str | None = None) -> dict:
         data = dict(row)
         data["items"] = [dict(i) for i in items]
         data["quality_stats"] = {r["quality"]: r["c"] for r in quality_stats}
+        status = idem_key_svc.batch_status(batch_id, db_path)
+        data["append_count"] = status["append_count"]
+        # 详情与徽标同源：都取当刻访视行实计数，不用批次表里可能过期的缓存列。
+        data["item_count"] = status["item_count"]
+        data["gap_count"] = sum(
+            1 for i in data["items"] if i.get("quality") != "合格"
+        )
+        data["idem_aligned"] = status["aligned"]
+        data["idem_chip"] = status["chip"]
+        data["idem_blocked"] = status["blocked"]
         return data
 
 
@@ -109,7 +132,7 @@ def create_batch(
     site_id = int(site_id or 0)
     if site_id <= 0:
         raise ServiceError("必须指定试验中心")
-    with get_db(db_path) as conn:
+    with get_db(db_path, immediate=True) as conn:
         site = conn.execute(
             "SELECT * FROM trial_sites WHERE id=?", (site_id,)
         ).fetchone()
@@ -139,7 +162,8 @@ def create_batch(
             active_proto = protocols_svc.active_protocol(db_path)
             pid = active_proto["id"] if active_proto else None
         stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        code = f"VB-{site['site_code']}-{stamp}"
+        seq = conn.execute("SELECT COUNT(*) AS c FROM visit_batches").fetchone()["c"] + 1
+        code = f"VB-{site['site_code']}-{stamp}-{seq:03d}"
         cur = conn.execute(
             """
             INSERT INTO visit_batches(batch_code, site_id, protocol_id, status, note)
@@ -191,7 +215,9 @@ def add_visit_row(
         raise ServiceError("受试者键格式无效")
     if not visit_code:
         raise ServiceError("访视编码不能空")
-    with get_db(db_path) as conn:
+    # 页面上幂等徽标与追加次数对不上时，直接挡住重复追加。
+    idem_key_svc.require_aligned_or_raise(batch_id, db_path)
+    with get_db(db_path, immediate=True) as conn:
         batch = conn.execute(
             "SELECT * FROM visit_batches WHERE id=?", (batch_id,)
         ).fetchone()
@@ -218,34 +244,33 @@ def add_visit_row(
                         required = [str(x) for x in parsed]
                 except json.JSONDecodeError:
                     pass
-        dup = conn.execute(
-            """
-            SELECT id FROM visit_rows
-            WHERE batch_id=? AND subject_key=? AND visit_code=?
-            """,
-            (batch_id, subject_key, visit_code),
-        ).fetchone()
-        if dup:
-            raise ServiceError("同批受试者访视键已存在（重复键）")
         if quality:
             if quality not in ROW_QUALITY:
                 raise ServiceError("质量标记无效")
             q = quality
         else:
             q = _infer_quality(payload, subject_key, visit_code, required)
-        # soft duplicate across open batches for same site
-        soft = conn.execute(
+        # 幂等键：读轨只认旁路账册凭证；同中心开放批内重复即拒收。
+        pinned = conn.execute(
             """
-            SELECT r.id FROM visit_rows r
-            JOIN visit_batches b ON b.id=r.batch_id
-            WHERE b.site_id=? AND b.id!=? AND b.status!='已关闭'
-              AND r.subject_key=? AND r.visit_code=?
+            SELECT k.id FROM idem_append_keys k
+            JOIN visit_batches b ON b.id=k.batch_id
+            WHERE k.site_id=? AND k.subject_key=? AND k.visit_code=?
+              AND k.state='pinned' AND b.status!='已关闭'
             LIMIT 1
             """,
-            (batch["site_id"], batch_id, subject_key, visit_code),
+            (batch["site_id"], subject_key, visit_code),
         ).fetchone()
-        if soft and q == "合格":
-            q = "重复键"
+        if pinned:
+            idem_key_svc.record_attempt_conn(
+                conn,
+                batch_id,
+                subject_key,
+                visit_code,
+                idem_key_svc.REJECTED,
+                "同中心开放批内幂等键已钉定",
+            )
+            raise ServiceError("同中心开放批内受试者访视键已钉定（重复追加）", 409)
         cur = conn.execute(
             """
             INSERT INTO visit_rows(batch_id, subject_key, visit_code, payload, quality, status)
@@ -254,6 +279,10 @@ def add_visit_row(
             (batch_id, subject_key, visit_code, payload, q),
         )
         row_id = cur.lastrowid
+        # 落库即写凭证：先写行再钉账册，任何一步失败整事务回滚。
+        idem_key_svc.pin_conn(
+            conn, batch_id, row_id, batch["site_id"], subject_key, visit_code
+        )
         _refresh_batch_counts(conn, batch_id)
         if batch["status"] == "已收齐":
             conn.execute(
@@ -277,7 +306,9 @@ def mock_crawl(
     db_path: str | None = None,
 ) -> dict:
     count = max(1, min(30, int(count or 5)))
+    idem_key_svc.require_aligned_or_raise(batch_id, db_path)
     created = []
+    rejected = 0
     with get_db(db_path) as conn:
         batch = conn.execute(
             "SELECT * FROM visit_batches WHERE id=?", (batch_id,)
@@ -325,16 +356,21 @@ def mock_crawl(
                 ensure_ascii=False,
             )
             quality = "合格"
-        created.append(
-            add_visit_row(
-                batch_id,
-                subject,
-                visit,
-                payload=payload,
-                quality=quality,
-                db_path=db_path,
+        try:
+            created.append(
+                add_visit_row(
+                    batch_id,
+                    subject,
+                    visit,
+                    payload=payload,
+                    quality=quality,
+                    db_path=db_path,
+                )
             )
-        )
+        except ServiceError:
+            # 受幂等键或中心配额所阻即停，不把虚追加次数灌进列表。
+            rejected += 1
+            break
     audit_svc.write_event(
         "模拟抓取访视",
         "visit_batch",
@@ -342,11 +378,16 @@ def mock_crawl(
         f"新增{len(created)}行",
         db_path=db_path,
     )
-    return {"created": len(created), "items": created, "batch": get_batch(batch_id, db_path)}
+    return {
+        "created": len(created),
+        "items": created,
+        "rejected": rejected,
+        "batch": get_batch(batch_id, db_path),
+    }
 
 
 def close_batch(batch_id: int, db_path: str | None = None) -> dict:
-    with get_db(db_path) as conn:
+    with get_db(db_path, immediate=True) as conn:
         batch = conn.execute(
             "SELECT * FROM visit_batches WHERE id=?", (batch_id,)
         ).fetchone()
@@ -373,6 +414,8 @@ def close_batch(batch_id: int, db_path: str | None = None) -> dict:
             """,
             (batch_id,),
         )
+        # 收批即释放幂等键，后续批次可自觉承接同一受试者访视键。
+        idem_key_svc.release_for_batch(conn, batch_id)
     audit_svc.write_event("关闭访视批次", "visit_batch", batch_id, "", db_path=db_path)
     return get_batch(batch_id, db_path)
 

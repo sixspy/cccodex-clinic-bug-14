@@ -6,7 +6,7 @@ from app.services.errors import ServiceError
 
 
 def dashboard(db_path: str | None = None) -> dict:
-    from app.services.idem_key_audit import audit_summary as _idem_key_audit
+    from app.services.idem_key import board as _idem_key_board
     with get_db(db_path) as conn:
         sites = conn.execute("SELECT COUNT(*) AS c FROM trial_sites").fetchone()["c"]
         sites_enabled = conn.execute(
@@ -47,7 +47,7 @@ def dashboard(db_path: str | None = None) -> dict:
             "pending_jobs": jobs,
             "audits": audits,
             "batch_status": {r["status"]: r["c"] for r in by_batch_status},
-            "idem_key_audit": _idem_key_audit(db_path),
+            "idem_key_audit": _idem_key_board(db_path),
         }
 
 
